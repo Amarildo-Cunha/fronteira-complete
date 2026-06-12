@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🤠 Fronteira - Jogo Velho Oeste 3D</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #eee;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 800px;
+            text-align: center;
+            background: rgba(0,0,0,0.5);
+            padding: 60px 40px;
+            border-radius: 10px;
+            border: 2px solid #f39c12;
+            box-shadow: 0 8px 32px rgba(243, 156, 18, 0.3);
+        }
+
+        h1 {
+            font-size: 48px;
+            margin-bottom: 20px;
+            color: #f39c12;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+        }
+
+        .subtitle {
+            font-size: 20px;
+            color: #bbb;
+            margin-bottom: 30px;
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin: 40px 0;
+            text-align: left;
+        }
+
+        .stat {
+            background: rgba(243, 156, 18, 0.1);
+            padding: 15px;
+            border-left: 3px solid #f39c12;
+            border-radius: 5px;
+        }
+
+        .stat strong {
+            color: #f39c12;
+        }
+
+        .stat p {
+            font-size: 14px;
+            color: #aaa;
+            margin-top: 5px;
+        }
+
+        .buttons {
+            margin-top: 40px;
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 15px 40px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            text-decoration: none;
+            transition: all 0.3s;
+            font-weight: bold;
+        }
+
+        .btn-play {
+            background: #f39c12;
+            color: #000;
+            flex: 1;
+            min-width: 200px;
+        }
+
+        .btn-play:hover {
+            background: #e67e22;
+            transform: scale(1.05);
+            box-shadow: 0 5px 20px rgba(243, 156, 18, 0.5);
+        }
+
+        .btn-github {
+            background: #333;
+            color: #f39c12;
+            flex: 1;
+            min-width: 200px;
+            border: 2px solid #f39c12;
+        }
+
+        .btn-github:hover {
+            background: #f39c12;
+            color: #000;
+        }
+
+        .features {
+            margin-top: 40px;
+            text-align: left;
+        }
+
+        .features h2 {
+            color: #f39c12;
+            margin-bottom: 15px;
+            font-size: 20px;
+        }
+
+        .features ul {
+            list-style: none;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            font-size: 14px;
+            color: #bbb;
+        }
+
+        .features li:before {
+            content: "✅ ";
+            color: #f39c12;
+            font-weight: bold;
+        }
+
+        .footer {
+            margin-top: 40px;
+            padding-top: 30px;
+            border-top: 1px solid #f39c12;
+            font-size: 12px;
+            color: #888;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .spinner {
+            border: 3px solid #333;
+            border-top: 3px solid #f39c12;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 600px) {
+            h1 {
+                font-size: 36px;
+            }
+
+            .stats {
+                grid-template-columns: 1fr;
+            }
+
+            .features ul {
+                grid-template-columns: 1fr;
+            }
+
+            .buttons {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤠 FRONTEIRA</h1>
+        <p class="subtitle">Jogo Multiplayer Velho Oeste 3D</p>
+
+        <div class="stats">
+            <div class="stat">
+                <strong>Engine:</strong>
+                <p>Three.js r128 (WebGL)</p>
+            </div>
+            <div class="stat">
+                <strong>Backend:</strong>
+                <p>Node.js + Socket.io</p>
+            </div>
+            <div class="stat">
+                <strong>Versão:</strong>
+                <p>v1.7 (Produção)</p>
+            </div>
+            <div class="stat">
+                <strong>Multiplayer:</strong>
+                <p>Real-time Sync</p>
+            </div>
+        </div>
+
+        <div class="buttons">
+            <button class="btn btn-play" onclick="iniciarJogo()">
+                🎮 JOGAR AGORA
+            </button>
+            <a href="https://github.com/Amarildo-Cunha/fronteira-complete" class="btn btn-github">
+                🐙 GitHub
+            </a>
+        </div>
+
+        <div class="loading" id="loading">
+            <p>Carregando...</p>
+            <div class="spinner"></div>
+        </div>
+
+        <div class="features">
+            <h2>Features</h2>
+            <ul>
+                <li>Mundo 3D persistente</li>
+                <li>Terraforming em tempo real</li>
+                <li>Breeding genético</li>
+                <li>Crafting & construções</li>
+                <li>Multiplayer (10 Hz sync)</li>
+                <li>NPCs com IA</li>
+                <li>Hotbar drag-drop</li>
+                <li>9 espécies de animais</li>
+            </ul>
+        </div>
+
+        <div class="footer">
+            <p>
+                Desenvolvido por <strong>Cunha @ Z-Tech</strong><br>
+                Backend: AWS EC2 + RDS + ElastiCache<br>
+                Game: Three.js + Socket.io<br>
+                <a href="https://github.com/Amarildo-Cunha/fronteira-complete" style="color: #f39c12; text-decoration: none;">
+                    github.com/Amarildo-Cunha/fronteira-complete
+                </a>
+            </p>
+        </div>
+    </div>
+
+    <script>
+        function iniciarJogo() {
+            const loading = document.getElementById('loading');
+            loading.style.display = 'block';
+            
+            // Pega o nome do jogador
+            const playerName = prompt('👤 Qual é seu nome?', 'Cowboy');
+            
+            if (playerName) {
+                // Redireciona para o jogo com parâmetro
+                const serverUrl = 'http://54.83.71.67:3000'; // URL do backend em AWS
+                setTimeout(() => {
+                    window.location.href = `fronteira-game.html?player=${encodeURIComponent(playerName)}&server=${encodeURIComponent(serverUrl)}`;
+                }, 500);
+            } else {
+                loading.style.display = 'none';
+            }
+        }
+
+        // Redirect automático após 3s de inatividade (opcional)
+        // setTimeout(() => {
+        //     iniciarJogo();
+        // }, 3000);
+    </script>
+</body>
+</html>
