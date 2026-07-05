@@ -222,6 +222,7 @@ const IT={
  ferradura:['Ferradura','Ω'],sela:['Sela','🐎'],arreio:['Arreio','🎠'],roda:['Roda','☸️'],panela:['Panela','🍳'],cantil:['Cantil','🥤'],
  camisa:['Camisa','👕'],calca:['Calça','👖'],chapeu:['Chapéu de Couro','🤠'],jaqueta:['Jaqueta de Couro','🧥'],saco:['Saco','👜'],tocha:['Tocha','🔥'],
  barco:['Barco a Remo','🛶'],carroca:['Carroça','🛞'],
+ totem:['Totem (Marco Zero)','🗿'],terra:['Terra','🟤'],
 };
 const PRICE={leite:2,muda:3,muda_arbusto:1.5,tora:1,galho:0,tabua:1,casca:0,prego:1,fibra:0,corda:2,fio:1,tecido:4,la:2,algodao:2,pedra:0,
  minerio_ferro:2,carvao:1,barra_ferro:6,carne_crua:2,carne_assada:4,peixe:2,peixe_assado:4,fruta:1,milho:1,trigo:1,
@@ -239,7 +240,7 @@ const CAT={leite:'comida',carne_crua:'comida',carne_assada:'comida',peixe:'comid
 const FOOD={leite:12,carne_assada:25,peixe_assado:20,pao:18,ensopado:45,fruta:8,carne_crua:6,ovo:6,milho:6,trigo:5,peixe:5};
 const EQUIP=new Set(['machado_pedra','picareta_pedra','faca_pedra','machado','picareta','faca','foice','martelo',
  'vara_pesca','arco','revolver','rifle','tocha','carne_assada','peixe_assado','pao','ensopado','fruta','carne_crua',
- 'ovo','milho','trigo','peixe','leite','corda','muda','muda_arbusto','semente_milho','semente_trigo','semente_algodao']);
+ 'ovo','milho','trigo','peixe','leite','corda','muda','muda_arbusto','semente_milho','semente_trigo','semente_algodao','totem']);
 const STN={mao:'Mãos livres',fogueira:'Fogueira',serraria:'Serraria',forja:'Forja',curtume:'Curtume',tear:'Tear',bancada:'Bancada de Armeiro'};
 const RECIPES=[
  {nome:'Corda',st:'mao',req:{fibra:3},out:{corda:1},sk:'tecelagem'},
@@ -319,7 +320,7 @@ const SPECIES={
 const SKILLS={lenhador:'Lenhador',mineracao:'Mineração',cacada:'Caçada',pesca:'Pesca',coleta:'Coleta',
  agricultura:'Agricultura',fundicao:'Fundição',ferraria:'Ferraria / Metalurgia',carpintaria:'Carpintaria',
  tecelagem:'Tecelagem',couraria:'Couraria / Curtimento',culinaria:'Culinária',doma:'Doma',
- criacao:'Criação de Animais',armas:'Armas de Fogo',comercio:'Comércio'};
+ criacao:'Criação de Animais',armas:'Armas de Fogo',comercio:'Comércio',terraformacao:'Terraformação'};
 
 /* ================= ESTADO ================= */
 function xpForLvl(L){ return Math.floor(72*Math.pow(L-1,2.05)); } // XP total p/ ESTAR no nível L
@@ -470,6 +471,296 @@ function getH(x,z){
  return h;
 }
 function nearWater(x,z){ return getH(x,z)<0.6; }
+
+/* ---- coloração procedural do terreno (compartilhada entre a malha base e os chunks) ---- */
+const TCOL={CG:new THREE.Color(0xc8e8a8),CD:new THREE.Color(0xcfd394),CR:new THREE.Color(0xb0a386),
+ CS:new THREE.Color(0xddc28c),CT:new THREE.Color(0xc8a878)};
+function smooth2Global(x,z){ const n=(xx,zz)=>{ const x0=Math.floor(xx),z0=Math.floor(zz),fx=xx-x0,fz=zz-z0;
+  const sx=fx*fx*(3-2*fx),sz=fz*fz*(3-2*fz);
+  const a=hash2(x0,z0),b=hash2(x0+1,z0),c2=hash2(x0,z0+1),d=hash2(x0+1,z0+1);
+  return a+(b-a)*sx+(c2-a)*sz+(a-b-c2+d)*sx*sz; };
+ return n(x*.025,z*.025)*.65+n(x*.09,z*.09)*.35; }
+function terrainColorAt(x,z,h){ const c=new THREE.Color();
+ const dry=smooth2Global(x+500,z-300), dirtN=smooth2Global(x*1.7-900,z*1.7+700);
+ if(h<0.8)c.copy(TCOL.CS);
+ else if(h>16)c.copy(TCOL.CR);
+ else { c.copy(TCOL.CG).lerp(TCOL.CD,clamp((dry-.45)*2.2,0,.85));
+  c.lerp(TCOL.CD,clamp((h-10)/8,0,.65));
+  if(dirtN>.62)c.lerp(TCOL.CT,clamp((dirtN-.62)*4,0,.85));
+  if(h<2.2)c.lerp(TCOL.CG.clone().offsetHSL(.02,.1,0),clamp((2.2-h)/1.4,0,.7)); }
+ c.offsetHSL(0,0,(hash2(x*.5,z*.5)-.5)*.06);
+ return c; }
+let sharedGroundTexture=null;
+function getSharedGroundTexture(){ if(!sharedGroundTexture)sharedGroundTexture=makeGroundTexture(); return sharedGroundTexture; }
+
+/* ================= TERRAFORMING — CHUNKS ESTILO WURM ================= */
+const TILE_SIZE=2;          // tamanho do tile (canto a canto), em metros
+const CHUNK_TILES=8;        // tiles por lado do chunk
+const CHUNK_SIZE=TILE_SIZE*CHUNK_TILES; // 16m por chunk
+const DIG_STEP_M=0.10;      // incremento de altura por ação de DIG/ELEVAR (10cm)
+let heightGrid=new Map();   // "gx,gz" (índice de canto) -> altura em metros (editada)
+let flatTiles=new Set();    // "tx,tz" (índice de tile) -> marcado como FLAT (origem, tecla Z)
+let niveladoTiles=new Set(); // "tx,tz" -> nivelado por propagação (tecla N), cor diferente do FLAT original
+let activeChunks=new Map(); // "cx,cz" -> {cx,cz}
+const chunkMeshes={};        // "cx,cz" -> THREE.Mesh
+const chunkGridLines={};     // "cx,cz" -> THREE.LineSegments (grade visual dos tiles)
+
+function chunkKey(cx,cz){ return cx+','+cz; }
+function chunkIdxAt(x,z){ return {cx:Math.floor(x/CHUNK_SIZE),cz:Math.floor(z/CHUNK_SIZE)}; }
+function cornerKey(gx,gz){ return gx+','+gz; }
+function cornerH(gx,gz){ const k=cornerKey(gx,gz);
+ return heightGrid.has(k)?heightGrid.get(k):getH(gx*TILE_SIZE,gz*TILE_SIZE); }
+function setCornerH(gx,gz,h){ heightGrid.set(cornerKey(gx,gz),h); }
+function isChunkActive(x,z){ const{cx,cz}=chunkIdxAt(x,z); return activeChunks.has(chunkKey(cx,cz)); }
+
+// altura interpolada dentro de um tile (mesma triangulação usada no render)
+function tileHeightAt(x,z){
+ const tx=Math.floor(x/TILE_SIZE),tz=Math.floor(z/TILE_SIZE);
+ const fx=(x/TILE_SIZE)-tx, fz=(z/TILE_SIZE)-tz;
+ const h00=cornerH(tx,tz),h10=cornerH(tx+1,tz),h01=cornerH(tx,tz+1),h11=cornerH(tx+1,tz+1);
+ if(fx+fz<=1) return h00+(h10-h00)*fx+(h01-h00)*fz;
+ return h11+(h10-h11)*(1-fz)+(h01-h11)*(1-fx);
+}
+// canto mais próximo de um ponto (para mira do DIG/ELEVAR)
+function nearestCorner(x,z){ return {gx:Math.round(x/TILE_SIZE),gz:Math.round(z/TILE_SIZE)}; }
+
+// cor de destaque do canto: FLAT (origem, tecla Z) tem prioridade sobre NIVELADO (propagado, tecla N)
+function cornerTint(gx,gz){
+ const offs=[[-1,-1],[0,-1],[-1,0],[0,0]];
+ for(const[dx,dz]of offs) if(flatTiles.has(tileKey(gx+dx,gz+dz))) return FLAT_TINT;
+ for(const[dx,dz]of offs) if(niveladoTiles.has(tileKey(gx+dx,gz+dz))) return NIVELADO_TINT;
+ return null; }
+const FLAT_TINT=new THREE.Color(0xffe066);     // dourado — tile FLAT original
+const NIVELADO_TINT=new THREE.Color(0x66e0e0); // ciano — tile nivelado por propagação
+function buildChunkMesh(cx,cz){
+ const ox=cx*CHUNK_SIZE+CHUNK_SIZE/2, oz=cz*CHUNK_SIZE+CHUNK_SIZE/2;
+ const g=new THREE.PlaneGeometry(CHUNK_SIZE,CHUNK_SIZE,CHUNK_TILES,CHUNK_TILES);
+ g.rotateX(-Math.PI/2);
+ const pos=g.attributes.position; const colors=[];
+ for(let i=0;i<pos.count;i++){
+  const wx=ox+pos.getX(i), wz=oz+pos.getZ(i);
+  const gx=Math.round(wx/TILE_SIZE), gz=Math.round(wz/TILE_SIZE);
+  const h=cornerH(gx,gz);
+  pos.setY(i,h);
+  const c=terrainColorAt(wx,wz,h);
+  const tint=cornerTint(gx,gz); if(tint)c.lerp(tint,0.5);
+  colors.push(c.r,c.g,c.b);
+ }
+ g.setAttribute('color',new THREE.Float32BufferAttribute(colors,3));
+ g.computeVertexNormals();
+ const mat=new THREE.MeshLambertMaterial({vertexColors:true,map:getSharedGroundTexture()});
+ mat.polygonOffset=true; mat.polygonOffsetFactor=1; mat.polygonOffsetUnits=1; // empurra o terreno p/ trás no depth buffer, sem precisar de LIFT grande no grid
+ mat.onBeforeCompile=sh=>{ sh.fragmentShader=sh.fragmentShader.replace('#include <map_fragment>',
+  `#include <map_fragment>
+   vec4 macroTex=texture2D(map, vUv*0.0937);
+   diffuseColor.rgb*=mix(vec3(1.0), macroTex.rgb*1.85, 0.40);`); };
+ const mesh=new THREE.Mesh(g,mat);
+ mesh.position.set(ox,0.015,oz); // leve offset p/ evitar z-fighting com o terreno base
+ mesh.receiveShadow=true; mesh.castShadow=false;
+ mesh.userData.cx=cx; mesh.userData.cz=cz;
+ scene.add(mesh);
+ chunkMeshes[chunkKey(cx,cz)]=mesh;
+ return mesh;
+}
+// linhas visuais marcando cada tile (segue a altura real, inclusive terreno já editado)
+function buildChunkGrid(cx,cz){
+ const baseGx=cx*CHUNK_TILES, baseGz=cz*CHUNK_TILES;
+ const pts=[];
+ const LIFT=0.03; // pequeno, já que o polygonOffset do terreno evita o z-fighting de forma confiável
+ for(let j=0;j<=CHUNK_TILES;j++){ const gz=baseGz+j, z=gz*TILE_SIZE;
+  for(let i=0;i<CHUNK_TILES;i++){ const gx1=baseGx+i,gx2=gx1+1;
+   pts.push(gx1*TILE_SIZE,cornerH(gx1,gz)+LIFT,z, gx2*TILE_SIZE,cornerH(gx2,gz)+LIFT,z); } }
+ for(let i=0;i<=CHUNK_TILES;i++){ const gx=baseGx+i, x=gx*TILE_SIZE;
+  for(let j=0;j<CHUNK_TILES;j++){ const gz1=baseGz+j,gz2=gz1+1;
+   pts.push(x,cornerH(gx,gz1)+LIFT,gz1*TILE_SIZE, x,cornerH(gx,gz2)+LIFT,gz2*TILE_SIZE); } }
+ const g=new THREE.BufferGeometry();
+ g.setAttribute('position',new THREE.Float32BufferAttribute(pts,3));
+ const mat=new THREE.LineBasicMaterial({color:0x1e90ff,transparent:true,opacity:1});
+ const lines=new THREE.LineSegments(g,mat);
+ lines.renderOrder=1; // só um pouco acima do terreno base, mas sem ignorar objetos 3D (árvores, construções etc)
+ lines.visible=typeof terraformMode!=='undefined'&&terraformMode;
+ lines.userData.cx=cx; lines.userData.cz=cz;
+ scene.add(lines);
+ chunkGridLines[chunkKey(cx,cz)]=lines;
+ return lines;
+}
+function refreshChunkMesh(cx,cz){ const k=chunkKey(cx,cz); const old=chunkMeshes[k];
+ if(old){ scene.remove(old); old.geometry.dispose(); old.material.dispose(); }
+ buildChunkMesh(cx,cz);
+ const oldG=chunkGridLines[k];
+ if(oldG){ scene.remove(oldG); oldG.geometry.dispose(); oldG.material.dispose(); }
+ buildChunkGrid(cx,cz);
+ repositionEntitiesInChunk(cx,cz);
+ syncBaseTerrainChunk(cx,cz); }
+// afunda/levanta os vértices da malha base (o terreno grosseiro original) dentro da área do chunk,
+// senão ela continua "tampando" o buraco (ou escondendo o morro) por cima do chunk detalhado
+function syncBaseTerrainChunk(cx,cz){
+ if(!baseGroundMesh)return;
+ const pad=1, minX=cx*CHUNK_SIZE-pad, maxX=cx*CHUNK_SIZE+CHUNK_SIZE+pad,
+       minZ=cz*CHUNK_SIZE-pad, maxZ=cz*CHUNK_SIZE+CHUNK_SIZE+pad;
+ const pos=baseGroundMesh.geometry.attributes.position; let touched=false;
+ for(let i=0;i<pos.count;i++){ const x=pos.getX(i),z=pos.getZ(i);
+  if(x>=minX&&x<=maxX&&z>=minZ&&z<=maxZ){ pos.setY(i,tileHeightAt(x,z)); touched=true; } }
+ if(touched){ pos.needsUpdate=true; baseGroundMesh.geometry.computeVertexNormals(); }
+}
+// reergue árvores/pedras/arbustos/construções/corpos/itens no chão pra acompanhar a nova altura do terreno
+function repositionEntitiesInChunk(cx,cz){
+ const pad=1, minX=cx*CHUNK_SIZE-pad, maxX=cx*CHUNK_SIZE+CHUNK_SIZE+pad,
+       minZ=cz*CHUNK_SIZE-pad, maxZ=cz*CHUNK_SIZE+CHUNK_SIZE+pad;
+ for(const obj of clickables){ const ent=obj.userData&&obj.userData.ent;
+  if(!ent||ent.x===undefined||ent.z===undefined)continue;
+  if(ent.x>=minX&&ent.x<=maxX&&ent.z>=minZ&&ent.z<=maxZ) obj.position.y=groundY(ent.x,ent.z)+(ent.yOff||0);
+ }
+ for(const b of buildings){ if(b.kind==='canteiro'&&b.plant&&b.x>=minX&&b.x<=maxX&&b.z>=minZ&&b.z<=maxZ)
+  b.plant.position.y=groundY(b.x,b.z)+(b.plantYOff||0.35); }
+}
+function setGridLinesVisible(v){ for(const k in chunkGridLines)chunkGridLines[k].visible=v; }
+function refreshChunksNear(gx,gz){ // reconstroi todos os chunks que tocam esse canto (até 4)
+ const wx=gx*TILE_SIZE, wz=gz*TILE_SIZE;
+ const seen=new Set();
+ for(const[dx,dz]of[[0,0],[-1,0],[1,0],[0,-1],[0,1]]){
+  const{cx,cz}=chunkIdxAt(wx+dx*0.01,wz+dz*0.01);
+  const k=chunkKey(cx,cz);
+  if(activeChunks.has(k)&&!seen.has(k)){ seen.add(k); refreshChunkMesh(cx,cz); }
+ }
+}
+function createChunkAt(x,z){
+ const{cx,cz}=chunkIdxAt(x,z); const key=chunkKey(cx,cz);
+ if(activeChunks.has(key))return false;
+ activeChunks.set(key,{cx,cz});
+ buildChunkMesh(cx,cz);
+ buildChunkGrid(cx,cz);
+ syncBaseTerrainChunk(cx,cz);
+ return true;
+}
+// tenta expandir pra um chunk vizinho de um chunk já ativo; retorna true se criou ou já existia
+function expandChunkIfAdjacent(x,z){
+ const{cx,cz}=chunkIdxAt(x,z); const key=chunkKey(cx,cz);
+ if(activeChunks.has(key))return true;
+ const adj=[[cx-1,cz],[cx+1,cz],[cx,cz-1],[cx,cz+1]].some(([nx,nz])=>activeChunks.has(chunkKey(nx,nz)));
+ if(adj){ activeChunks.set(key,{cx,cz}); buildChunkMesh(cx,cz); buildChunkGrid(cx,cz); syncBaseTerrainChunk(cx,cz); return true; }
+ return false;
+}
+
+/* ---- modo terraformar (tecla F) — DIG / ELEVAR por canto ---- */
+const WAGON_RANGE=6, TERRA_PER_STEP=1;
+let terraformMode=false;
+function setFlatLabelsVisible(v){ for(const k in flatLabels)flatLabels[k].visible=v; }
+function toggleTerraform(){ terraformMode=!terraformMode;
+ setGridLinesVisible(terraformMode);
+ setFlatLabelsVisible(terraformMode);
+ if(terraformMode){ if(buildMode)cancelBuild();
+  notify('⛏️ <b>Modo Terraformar</b> ativado — clique: <b>Escavar</b> · Shift+clique: <b>Elevar</b> · <b>Z</b>: Flat · <b>N</b>: Nivelar · F ou Esc: sair.'); }
+ else notify('⛏️ Modo Terraformar desativado.'); }
+function nearWagon(){ return typeof wagonPos!=='undefined'&&Math.hypot(player.x-wagonPos.x,player.z-wagonPos.z)<WAGON_RANGE; }
+function depositTerra(q){ if(nearWagon()){ if(!chest['terra'])chest['terra']={q:0,ql:30};
+   chest['terra'].q+=q; renderPanel(); return 'carroça'; }
+ give('terra',q,30); return 'inventário'; }
+function withdrawTerra(q){ if(nearWagon()&&chest['terra']&&chest['terra'].q>=q){
+   chest['terra'].q-=q; if(chest['terra'].q<=0)delete chest['terra']; renderPanel(); return true; }
+ if(has('terra',q)){ take('terra',q); return true; } return false; }
+// restringe DIG/ELEVAR/FLAT ao tile em que o player está + os tiles adjacentes (3x3) — pra ir mais além, precisa se mover
+function withinReach(p){ const pt=tileIdxAt(player.x,player.z), at=tileIdxAt(p.x,p.z);
+ return Math.abs(at.tx-pt.tx)<=1 && Math.abs(at.tz-pt.tz)<=1; }
+function doTerraform(mode){
+ const p=aimGround(80); if(!p)return;
+ if(!withinReach(p)){ notify('⛏️ Muito longe — mova-se até o tile pra conseguir mexer nele.'); return; }
+ if(!isChunkActive(p.x,p.z)&&!expandChunkIfAdjacent(p.x,p.z)){
+  notify('⛏️ Muito longe da sua área — terraforme a partir da borda do seu terreno pra expandir.'); return; }
+ const{gx,gz}=nearestCorner(p.x,p.z);
+ const cur=cornerH(gx,gz);
+ if(mode==='dig'){
+  setCornerH(gx,gz,cur-DIG_STEP_M);
+  const dest=depositTerra(TERRA_PER_STEP);
+  notify('⛏️ Escavou -10cm no canto. (+1 Terra → '+dest+')');
+ } else {
+  if(!withdrawTerra(TERRA_PER_STEP)){
+   notify('⛏️ Sem Terra suficiente pra elevar (precisa 1× Terra — pegue na carroça ou tenha no inventário).'); return; }
+  setCornerH(gx,gz,cur+DIG_STEP_M);
+  notify('⛏️ Elevou +10cm no canto.');
+ }
+ checkUnflatten(gx,gz); // se esse canto pertencia a um tile FLAT/NIVELADO, ele pode ter perdido o status
+ gainSkill('terraformacao',0.6);
+ refreshChunksNear(gx,gz);
+ setGridLinesVisible(terraformMode); // garante que o grid continua visível (nunca some) enquanto o modo estiver ativo
+}
+function tileKey(tx,tz){ return tx+','+tz; }
+function tileIdxAt(x,z){ return {tx:Math.floor(x/TILE_SIZE),tz:Math.floor(z/TILE_SIZE)}; }
+function isTileFlat(tx,tz){ const k=tileKey(tx,tz); return flatTiles.has(k)||niveladoTiles.has(k); }
+function refreshTileChunks(tx,tz){ // reconstrói todos os chunks tocados pelos 4 cantos do tile
+ refreshChunksNear(tx,tz); refreshChunksNear(tx+1,tz); refreshChunksNear(tx,tz+1); refreshChunksNear(tx+1,tz+1); }
+// sprite de texto flutuante "FLAT" (usado tanto no tile FLAT original quanto nos nivelados por propagação)
+const flatLabels={}; // "tx,tz" -> THREE.Sprite
+function makeTextSprite(text,color){
+ const cv=document.createElement('canvas'); cv.width=256; cv.height=64;
+ const ctx=cv.getContext('2d');
+ ctx.font='bold 34px sans-serif'; ctx.textAlign='center'; ctx.textBaseline='middle';
+ ctx.fillStyle='rgba(20,20,20,0.6)'; ctx.fillRect(0,0,cv.width,cv.height);
+ ctx.fillStyle=color; ctx.fillText(text,cv.width/2,cv.height/2);
+ const tex=new THREE.CanvasTexture(cv);
+ const spr=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,transparent:true}));
+ spr.scale.set(1.1,0.28,1);
+ return spr; }
+function ensureFlatLabel(tx,tz,h,color){ const k=tileKey(tx,tz);
+ let spr=flatLabels[k];
+ if(!spr){ spr=makeTextSprite('FLAT',color); scene.add(spr); flatLabels[k]=spr; }
+ spr.visible=typeof terraformMode!=='undefined'&&terraformMode;
+ spr.position.set((tx+0.5)*TILE_SIZE,h+0.35,(tz+0.5)*TILE_SIZE); }
+function removeFlatLabel(tx,tz){ const k=tileKey(tx,tz); const spr=flatLabels[k];
+ if(spr){ scene.remove(spr); if(spr.material.map)spr.material.map.dispose(); spr.material.dispose(); delete flatLabels[k]; } }
+// chamado sempre que um canto muda de altura; se algum tile que usa esse canto deixou de ter os 4 cantos iguais,
+// remove ele do FLAT/NIVELADO (tinta e texto somem)
+function checkUnflatten(gx,gz){
+ for(const[dx,dz]of[[-1,-1],[0,-1],[-1,0],[0,0]]){
+  const tx=gx+dx, tz=gz+dz, k=tileKey(tx,tz);
+  if(!flatTiles.has(k)&&!niveladoTiles.has(k))continue;
+  const h00=cornerH(tx,tz),h10=cornerH(tx+1,tz),h01=cornerH(tx,tz+1),h11=cornerH(tx+1,tz+1);
+  const stillFlat=Math.abs(h00-h10)<1e-6&&Math.abs(h00-h01)<1e-6&&Math.abs(h00-h11)<1e-6;
+  if(!stillFlat){ flatTiles.delete(k); niveladoTiles.delete(k); removeFlatLabel(tx,tz); }
+ }
+}
+// seta os 4 cantos do tile pra uma altura fixa; origin=true (tecla Z, FLAT original) ou false (tecla N, propagado/NIVELADO)
+function flattenTileTo(tx,tz,h,origin){
+ setCornerH(tx,tz,h); setCornerH(tx+1,tz,h); setCornerH(tx,tz+1,h); setCornerH(tx+1,tz+1,h);
+ const k=tileKey(tx,tz);
+ if(origin){ flatTiles.add(k); niveladoTiles.delete(k); ensureFlatLabel(tx,tz,h,'#ffe066'); }
+ else if(!flatTiles.has(k)){ niveladoTiles.add(k); ensureFlatLabel(tx,tz,h,'#66e0e0'); }
+ // essa mudança pode ter desnivelado tiles vizinhos que compartilhavam esses cantos
+ checkUnflatten(tx,tz); checkUnflatten(tx+1,tz); checkUnflatten(tx,tz+1); checkUnflatten(tx+1,tz+1);
+}
+// FLAT — nivela o tile mirado pela média dos seus 4 cantos
+let lastFlatActionT=-99, lastNivelarActionT=-99;
+function doFlat(){
+ if(simT-lastFlatActionT<0.4)return; lastFlatActionT=simT; // cooldown extra, além do e.repeat, contra disparo múltiplo
+ const p=aimGround(80); if(!p)return;
+ if(!withinReach(p)){ notify('🟩 Muito longe — mova-se até o tile pra conseguir dar FLAT nele.'); return; }
+ if(!isChunkActive(p.x,p.z)&&!expandChunkIfAdjacent(p.x,p.z)){
+  notify('🟩 Muito longe da sua área — terraforme a partir da borda do seu terreno pra expandir.'); return; }
+ const{tx,tz}=tileIdxAt(p.x,p.z);
+ const avg=(cornerH(tx,tz)+cornerH(tx+1,tz)+cornerH(tx,tz+1)+cornerH(tx+1,tz+1))/4;
+ flattenTileTo(tx,tz,avg,true);
+ refreshTileChunks(tx,tz); setGridLinesVisible(terraformMode);
+ gainSkill('terraformacao',0.6);
+ notify('🟩 Tile <b>FLAT</b> na altura '+avg.toFixed(2)+'m (tile único, em '+tx+','+tz+'). Fique em cima dele e aperte <b>N</b> pra nivelar os vizinhos.');
+}
+// NIVELAR — só funciona em cima de um tile já FLAT/nivelado; propaga a altura pros tiles conectados (adjacentes)
+// ATENÇÃO: por design, isso afeta o tile em que você está MAIS os 4 vizinhos diretos (cruz) — não é bug.
+function doNivelar(){
+ if(simT-lastNivelarActionT<0.4)return; lastNivelarActionT=simT; // cooldown extra contra disparo múltiplo
+ const{tx,tz}=tileIdxAt(player.x,player.z);
+ if(!isTileFlat(tx,tz)){ notify('🟩 Você precisa estar em cima de um tile <b>FLAT</b> pra nivelar (use Z primeiro).'); return; }
+ const h=cornerH(tx,tz);
+ let spread=0;
+ for(const[dx,dz]of[[-1,0],[1,0],[0,-1],[0,1]]){
+  const ntx=tx+dx, ntz=tz+dz;
+  const wx=(ntx+0.5)*TILE_SIZE, wz=(ntz+0.5)*TILE_SIZE; // centro do tile vizinho
+  if(!isChunkActive(wx,wz)&&!expandChunkIfAdjacent(wx,wz))continue;
+  flattenTileTo(ntx,ntz,h,false); refreshTileChunks(ntx,ntz); spread++;
+ }
+ setGridLinesVisible(terraformMode); gainSkill('terraformacao',0.6);
+ if(spread===0)notify('🟩 Nenhum tile vizinho dentro da sua área pra nivelar.');
+ else notify('🟩 <b>NIVELAR</b>: propagou pro tile em '+tx+','+tz+' + '+spread+' vizinho(s) em cruz, na altura '+h.toFixed(2)+'m.');
+}
 // terreno (textura procedural de grama/terra)
 function makeGroundTexture(){ const S=512; const cv=document.createElement('canvas'); cv.width=cv.height=S;
  const ctx=cv.getContext('2d');
@@ -503,6 +794,7 @@ function makeGroundTexture(){ const S=512; const cv=document.createElement('canv
   ctx.beginPath(); ctx.arc(Math.random()*S,Math.random()*S,1.1,0,7); ctx.fill(); }
  const tx=new THREE.CanvasTexture(cv); tx.wrapS=tx.wrapT=THREE.RepeatWrapping;
  tx.repeat.set(64,64); tx.anisotropy=4; return tx; }
+let baseGroundMesh=null;
 (function(){ const SIZE=820,SEG=150;
  const g=new THREE.PlaneGeometry(SIZE,SIZE,SEG,SEG); g.rotateX(-Math.PI/2);
  const pos=g.attributes.position; const colors=[];
@@ -531,6 +823,7 @@ function makeGroundTexture(){ const S=512; const cv=document.createElement('canv
   colors.push(c.r,c.g,c.b); }
  g.setAttribute('color',new THREE.Float32BufferAttribute(colors,3)); g.computeVertexNormals();
  const gm=new THREE.MeshLambertMaterial({vertexColors:true,map:makeGroundTexture()});
+ gm.polygonOffset=true; gm.polygonOffsetFactor=1; gm.polygonOffsetUnits=1;
  gm.onBeforeCompile=sh=>{ sh.fragmentShader=sh.fragmentShader.replace('#include <map_fragment>',
   `#include <map_fragment>
    vec4 macroTex=texture2D(map, vUv*0.0937);
@@ -538,6 +831,7 @@ function makeGroundTexture(){ const S=512; const cv=document.createElement('canv
  const m=new THREE.Mesh(g,gm);
  m.receiveShadow=true;
  scene.add(m);
+ baseGroundMesh=m;
 })();
 // água (duas camadas: fundo escuro + superfície com brilho leve)
 const waterDeep=new THREE.Mesh(new THREE.PlaneGeometry(900,900),
@@ -590,9 +884,11 @@ scene.background=new THREE.Color(0xcfe0ea);
 })();
 
 const clickables=[]; // raízes interagíveis
-function tagRoot(obj,ent){ obj.traverse(o=>o.userData.ent=ent); obj.userData.ent=ent; clickables.push(obj); ent.mesh=obj; }
+function tagRoot(obj,ent){ obj.traverse(o=>o.userData.ent=ent); obj.userData.ent=ent; clickables.push(obj); ent.mesh=obj;
+ if(ent.x!==undefined&&ent.z!==undefined) ent.yOff=obj.position.y-groundY(ent.x,ent.z); }
 function untag(obj){ const i=clickables.indexOf(obj); if(i>=0)clickables.splice(i,1); scene.remove(obj); }
-function groundY(x,z){ return Math.max(getH(x,z),0.05); }
+function groundY(x,z){ if(isChunkActive(x,z)) return Math.max(tileHeightAt(x,z),0.05);
+ return Math.max(getH(x,z),0.05); }
 
 /* ---- vegetação e nós ---- */
 function makeTex(w,h,fn,rx=1,ry=1){ const cv=document.createElement('canvas'); cv.width=w; cv.height=h;
@@ -975,6 +1271,18 @@ function buildMesh(kind){ const g=new THREE.Group();
    add(new THREE.CylinderGeometry(1,1,2.8,10,1,false,0,Math.PI),M.cloth,0,1.9,0).rotation.z=Math.PI/2;
    for(const dx of[-1,1])for(const dz of[-.85,.85]){const w=new THREE.Mesh(new THREE.CylinderGeometry(.55,.55,.12,10),M.wood2);
     w.rotation.x=Math.PI/2;w.position.set(dx,0.55,dz);g.add(w);} break;
+ case 'totem': { const wood=new THREE.MeshLambertMaterial({color:0x6a4a26});
+   const dark=new THREE.MeshLambertMaterial({color:0x3a2412});
+   add(new THREE.CylinderGeometry(.22,.28,2.6,8),wood,0,1.3,0); // poste principal
+   // 3 faixas esculpidas
+   for(let i=0;i<3;i++)add(new THREE.CylinderGeometry(.29,.29,.14,8),dark,0,.6+i*.75,0);
+   // "cabeça" no topo
+   add(new THREE.SphereGeometry(.26,8,7),new THREE.MeshLambertMaterial({color:0x8a5a32}),0,2.75,0);
+   // base de pedras
+   for(let i=0;i<6;i++){ const a=i/6*Math.PI*2;
+    add(new THREE.DodecahedronGeometry(.16,0),new THREE.MeshLambertMaterial({color:0x8a8478}),
+     Math.cos(a)*.42,.08,Math.sin(a)*.42); }
+   break; }
  }
  return g; }
 function placeBuilding(kind,x,z,owner='player',city,rot){ const g=buildMesh(kind==='casaNPC'?'casaNPC':kind);
@@ -1090,12 +1398,15 @@ canvas.addEventListener('contextmenu',e=>{ e.preventDefault(); if(!gameStarted)r
 function handlePrimary(){ if(!gameStarted)return; hideCtx();
  if(fishing&&fishing.bite){ fishAction(); return; }
  if(buildMode){ tryPlace(); return; }
+ if(terraformMode){ doTerraform(keys['shift']?'elevar':'dig'); return; }
  if(hoverEnt){ setTarget(hoverEnt,defaultAction(hoverEnt)); return; }
  if(hoverWater&&equipped==='vara_pesca'){ target={pt:hoverWater,action:'pescar',range:7}; walkPt=null; return; }
  if(hoverGroundPt&&(equipped==='muda'||equipped==='muda_arbusto')){
   target={pt:{...hoverGroundPt},action:'plantar_muda',range:2.5,tipo:equipped}; walkPt=null; return; }
  if(hoverGroundPt&&(equipped==='semente_milho'||equipped==='semente_trigo'||equipped==='semente_algodao')){
   target={pt:{...hoverGroundPt},action:'plantar_semente_chao',range:3,tipo:equipped}; walkPt=null; return; }
+ if(hoverGroundPt&&equipped==='totem'){
+  target={pt:{...hoverGroundPt},action:'plantar_totem',range:2.5}; walkPt=null; return; }
  if(hoverGroundPt){ walkPt={x:hoverGroundPt.x,z:hoverGroundPt.z}; target=null; markWalk(hoverGroundPt); } }
 canvas.addEventListener('click',e=>{ if(lMoved>7){ lMoved=0; return; } handlePrimary(); });
 
@@ -1128,14 +1439,18 @@ canvas.addEventListener('touchend',e=>{ e.preventDefault(); if(!gameStarted)retu
  tch.drag=false;
 },{passive:false});
 addEventListener('keydown',e=>{ if(!gameStarted)return; const k=e.key.toLowerCase(); keys[k]=true;
+ if(e.repeat)return; // ignora auto-repeat do navegador (tecla mantida) — evita disparar ações de único clique várias vezes
  if(k==='e'){ if(panelTab&&hoverItem){ useHoverItem(); return; }
   if(!panelTab&&hoverEnt)setTarget(hoverEnt,defaultAction(hoverEnt)); }
  if(k==='q'&&mounted)dismount();
  if(k==='i')togglePanel('inv'); if(k==='c')togglePanel('craft'); if(k==='k')togglePanel('skill');
  if(k==='t')togglePanel('town'); if(k==='b')toggleBuild(); if(k==='h')togglePanel('help');
+ if(k==='f'&&!buildMode)toggleTerraform();
+ if(k==='z'&&terraformMode)doFlat();
+ if(k==='n'&&terraformMode)doNivelar();
  if(k==='r'&&buildMode)rotateBuild();
  if(k==='g'&&buildMode)toggleSnap();
- if(k==='escape'){ hideCtx(); if(buildMode)cancelBuild(); else closePanel(); }
+ if(k==='escape'){ hideCtx(); if(buildMode)cancelBuild(); else if(terraformMode)toggleTerraform(); else closePanel(); }
  if(k>='1'&&k<='8'){ selectHotbar(parseInt(k)-1); }
 });
 addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
@@ -1270,6 +1585,16 @@ function performTarget(){ const e=target.ent, a=target.action;
   take(tipo,1);
   if(tipo==='muda'){ plantTree(p.x,p.z,pGen2||null); gainSkill('florestamento',1.2); }
   else spawnBush(p.x,p.z);
+  target=null; return; }
+ if(a==='plantar_totem'){ swingAvatar();
+  if(!inv['totem']){ target=null; return; }
+  const p=target.pt;
+  if(getH(p.x,p.z)<0.6){ notify('🗿 Muito perto da água para fincar o Totem.'); target=null; return; }
+  if(isChunkActive(p.x,p.z)){ notify('🗿 Já existe uma área de terraforming aqui.'); target=null; return; }
+  take('totem',1);
+  placeBuilding('totem',p.x,p.z,'player',undefined,0);
+  createChunkAt(p.x,p.z);
+  notify('🗿 <b>Marco Zero</b> fincado! A partir daqui você pode terraformar o terreno — escave, eleve, nivele.');
   target=null; return; }
  if(a==='catar'){ swingAvatar();
   if(simT<(e.handCd||0)){ notify('🪨 Sem pedras soltas agora.'); target=null; return; }
@@ -1406,7 +1731,7 @@ function plantSeed(plot){ const b=plot||((aimEnt(60)||{}).ent);
   const seed=equipped; if(!take(seed,1))return;
   b.crop=seed.replace('semente_',''); b.stage=0; b.t=0;
   const s=new THREE.Mesh(new THREE.ConeGeometry(.15,.4,5),new THREE.MeshLambertMaterial({color:0x6fae4a}));
-  s.position.set(b.x,groundY(b.x,b.z)+.35,b.z); scene.add(s); b.plant=s;
+  s.position.set(b.x,groundY(b.x,b.z)+.35,b.z); scene.add(s); b.plant=s; b.plantYOff=.35;
   notify('🌱 '+IT[b.crop][0]+' plantado.'); gainSkill('agricultura',.5); useCD=.5; }
  else notify('🌱 Mire num canteiro vazio (construa com B).'); }
 function growPlots(dt){ for(const b of buildings){ if(b.kind!=='canteiro'||!b.crop)continue;
@@ -1494,7 +1819,7 @@ function mount(a){ mounted=a; if(a.stam===undefined)a.stam=100; notify('🐎 Mon
 function dismount(){ if(mounted){ player.x=mounted.x+1.5; player.z=mounted.z; mounted=null; } }
 
 /* ================= CONSTRUÇÃO ================= */
-function toggleBuild(){ if(buildMode)cancelBuild(); else openPanel('build'); }
+function toggleBuild(){ if(terraformMode)toggleTerraform(); if(buildMode)cancelBuild(); else openPanel('build'); }
 function startBuild(kind){ closePanel(); buildMode=kind; buildRot=0;
  ghost=buildMesh(kind); ghost.traverse(o=>{ if(o.material){o.material=o.material.clone(); o.material.transparent=true; o.material.opacity=.55;} });
  scene.add(ghost); notify('🔨 Clique no chão para construir '+BUILDS[kind].nome+'. <b>R</b>/↻ gira · <b>G</b>/⌗ snap · Esc cancela.'); }
@@ -1998,6 +2323,14 @@ function updHover(){ const lbl=document.getElementById('hoverlbl');
  if(paused){ lbl.textContent=''; canvas.style.cursor='default'; return; }
  if(buildMode){ lbl.innerHTML='🔨 '+BUILDS[buildMode].nome+' · '+Math.round(buildRot*180/Math.PI)+'° · snap '+(snapOn?'ON':'off')+' — <span class="kbd">R</span> gira, <span class="kbd">G</span> snap, Esc cancela';
   hoverGroundPt=aimGround(80); canvas.style.cursor='crosshair'; return; }
+ if(terraformMode){ const p=aimGround(80); hoverGroundPt=p?{x:p.x,z:p.z}:null;
+  const dentro=p&&(isChunkActive(p.x,p.z)||[[-1,0],[1,0],[0,-1],[0,1],[0,0]].some(([dx,dz])=>{const{cx,cz}=chunkIdxAt(p.x+dx*0.01,p.z+dz*0.01);return activeChunks.has(chunkKey(cx,cz));}));
+  if(dentro){ const{gx,gz}=nearestCorner(p.x,p.z); const h=cornerH(gx,gz);
+   const{tx,tz}=tileIdxAt(p.x,p.z); const tk=tileKey(tx,tz);
+   const flatTag=flatTiles.has(tk)?' · <span style="color:#ffe066">FLAT</span>':(niveladoTiles.has(tk)?' · <span style="color:#66e0e0">NIVELADO</span>':'');
+   lbl.innerHTML='⛏️ Canto: <b>'+h.toFixed(2)+'m</b>'+flatTag+' — <span class="kbd">clique</span> Escavar · <span class="kbd">Shift+clique</span> Elevar · <span class="kbd">Z</span> Flat · <span class="kbd">N</span> Nivelar'; }
+  else lbl.innerHTML='⛏️ <span style="color:#c96a4a">Fora do alcance do seu Marco Zero</span>';
+  canvas.style.cursor='crosshair'; return; }
  const hit=aimEnt(200);
  if(hit&&hit.d<120){ hoverEnt=hit.ent;
   const acts=actionsFor(hoverEnt);
@@ -2009,12 +2342,14 @@ function updHover(){ const lbl=document.getElementById('hoverlbl');
   lbl.innerHTML=equipped==='vara_pesca'?'<span style="color:#fff">Pescar</span> <span style="color:#f6d75a">Água</span>':'<span style="color:#7ec8d8">Água</span> <span style="color:#9a8a6a;font-size:12px">(equipe a vara para pescar)</span>';
   canvas.style.cursor=equipped==='vara_pesca'?'pointer':'default'; return; }
  if(g){ hoverGroundPt={x:g.x,z:g.z};
-  lbl.innerHTML=(equipped==='muda'||equipped==='muda_arbusto')?'<span style="color:#9ad86a">Plantar '+IT[equipped][0]+' aqui</span>':'<span style="color:#cdb88e">Andar até aqui</span>';
+  lbl.innerHTML=(equipped==='muda'||equipped==='muda_arbusto')?'<span style="color:#9ad86a">Plantar '+IT[equipped][0]+' aqui</span>':
+   equipped==='totem'?'<span style="color:#f6d75a">🗿 Fincar Totem (Marco Zero) aqui</span>':'<span style="color:#cdb88e">Andar até aqui</span>';
   canvas.style.cursor='default'; }
  else lbl.textContent='';
 }
 function updPrompt(){ const el=document.getElementById('prompt');
  if(paused||buildMode){ el.classList.toggle('hidden',!buildMode); if(buildMode)el.innerHTML='🔨 Clique para construir '+BUILDS[buildMode].nome+' · <span class="kbd">Esc</span> cancela'; return; }
+ if(terraformMode){ el.classList.remove('hidden'); el.innerHTML='⛏️ Terraformar: <span class="kbd">clique</span> escavar · <span class="kbd">Shift</span>+clique elevar · <span class="kbd">Z</span> flat · <span class="kbd">N</span> nivelar · <span class="kbd">F</span>/Esc sair'; return; }
  const hit=aimEnt(5.5); let t='';
  if(hit){ const e=hit.ent;
   if(e.type==='bush')t=simT<e.cd?'🌿 Arbusto vasculhado':'<span class="kbd">E</span> Vasculhar arbusto';
@@ -2216,6 +2551,7 @@ function startGame(){ document.getElementById('intro').style.display='none';
  give('machado_pedra',1,40); give('picareta_pedra',1,40); give('faca_pedra',1,40);
  give('revolver',1,55); give('balas',12); give('pao',3,50); give('milho',4,40);
  give('semente_milho',3); give('semente_trigo',3); give('corda',2,40); give('vara_pesca',1,40);
+ give('totem',1);
  for(let i=0;i<8;i++)hotbarSlots[i]=null;
  const _eq=Object.keys(inv).filter(k=>EQUIP.has(k)).slice(0,8);
  _eq.forEach((k,i)=>hotbarSlots[i]=k);
